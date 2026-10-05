@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+#  SPECFEM++ · CUDA (Blackwell sm_120) 镜像
+#
+#  builder stage : nvcc 13.2 + GCC 13 + gfortran，编译 release-cuda preset
+#  runtime stage : 仅保留可执行文件 + 运行期依赖（~1GB，无需 nvcc）
+#
+#  用法:
+#    docker build -f Dockerfile.cuda --target builder -t specfempp-cuda:full .
+#    docker build -f Dockerfile.cuda -t specfempp-cuda:slim .
+# =============================================================================
+
+# ------------------------------------------------------------------ builder --
+FROM nvidia/cuda:13.2.0-devel-ubuntu24.04 AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        gfortran \
+        cmake \
+        ninja-build \
+        git \
+        ca-certificates \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/specfempp
+
+# .git 必须保留：cmake/version.cmake 靠 git describe 生成版本号
+COPY . /opt/specfempp
+
+# 说明:
+#  * Kokkos 5.2.0 由 FetchContent 自动下载
+#  * Ubuntu 24.04 只有 Boost 1.83，低于项目要求的 1.85，
+#    因此 boost.cmake 会回退到从源码编译 Boost 1.87（官方支持的路径）
+#  * VTK / HDF5 未安装 -> 自动关闭，不影响地震图(ASCII/SAC)输出
+RUN cmake --preset release-cuda \
+        -D Kokkos_ARCH_BLACKWELL120=ON \
+        -D Kokkos_ENABLE_SERIAL=ON \
+        -D SPECFEM_BUILD_TESTS=OFF \
+        -D SPECFEM_BUILD_BENCHMARKS=OFF \
+        -D SPECFEMPP_UNITY_BUILD_BATCH_SIZE=4 \
+    && cmake --build --preset release-cuda -j "$(nproc)" \
+    && rm -rf /opt/specfempp/build
+
+# ------------------------------------------------------------------ runtime --
+FROM nvidia/cuda:13.2.0-base-ubuntu24.04 AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Fortran mesher 需要 gfortran 运行库；Boost/Kokkos 均为静态链接，无需额外包
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgfortran5 \
+        libquadmath0 \
+        libgomp1 \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/specfempp/bin/release-cuda /opt/specfempp/bin/release-cuda
+
+ENV PATH=/opt/specfempp/bin/release-cuda:$PATH
+
+WORKDIR /work
+CMD ["/bin/bash"]
